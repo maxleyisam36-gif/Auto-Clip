@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>autoclip</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e8e9ec;
+    --muted: #9aa0ac;
+    --accent: #6c8cff;
+    --accent-hover: #86a0ff;
+    --error: #ff6c6c;
+    --success: #57d68d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; margin-bottom: 24px; font-size: 0.9rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; margin-top: 14px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=number], select {
+    width: 100%;
+    padding: 10px 12px;
+    background: #10131a;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button {
+    margin-top: 18px;
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: white;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { font-size: 0.9rem; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
+  #status.error { color: var(--error); }
+  #status.done { color: var(--success); }
+  .clip {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 12px;
+    background: #10131a;
+  }
+  .clip video { width: 100%; border-radius: 8px; display: block; margin-bottom: 8px; }
+  .clip .meta { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; color: var(--muted); }
+  .clip a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>autoclip</h1>
+  <p class="sub">Paste a link to your own video. Get back short, captioned clips.</p>
+
+  <div class="panel">
+    <label for="url">Video URL</label>
+    <input type="text" id="url" placeholder="https://youtube.com/watch?v=...">
+
+    <div class="row">
+      <div>
+        <label for="numClips">Number of clips</label>
+        <input type="number" id="numClips" value="5" min="1" max="20">
+      </div>
+      <div>
+        <label for="whisperModel">Transcription quality</label>
+        <select id="whisperModel">
+          <option value="tiny">Fastest (tiny)</option>
+          <option value="base" selected>Balanced (base)</option>
+          <option value="small">Better (small)</option>
+          <option value="medium">Best (medium)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="minSec">Min clip length (sec)</label>
+        <input type="number" id="minSec" value="20" min="1">
+      </div>
+      <div>
+        <label for="maxSec">Max clip length (sec)</label>
+        <input type="number" id="maxSec" value="60" min="1">
+      </div>
+    </div>
+
+    <button id="submitBtn">Create clips</button>
+    <div id="status"></div>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<script>
+const submitBtn = document.getElementById('submitBtn');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+
+const STATUS_LABELS = {
+  queued: "Queued...",
+  downloading: "Downloading your video...",
+  transcribing: "Transcribing audio (this can take a while)...",
+  selecting: "Picking the best moments...",
+  cutting: "Cutting and captioning clips...",
+  done: "Done!",
+  error: "Something went wrong",
+};
+
+let pollTimer = null;
+
+async function submitJob() {
+  const url = document.getElementById('url').value.trim();
+  if (!url) { alert("Paste a video URL first."); return; }
+
+  const body = {
+    url,
+    num_clips: parseInt(document.getElementById('numClips').value, 10),
+    min_sec: parseFloat(document.getElementById('minSec').value),
+    max_sec: parseFloat(document.getElementById('maxSec').value),
+    whisper_model: document.getElementById('whisperModel').value,
+  };
+
+  submitBtn.disabled = true;
+  resultsEl.innerHTML = '';
+  setStatus('queued', '');
+
+  try {
+    const res = await fetch('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Request failed');
+    }
+    const data = await res.json();
+    pollJob(data.job_id);
+  } catch (e) {
+    setStatus('error', e.message);
+    submitBtn.disabled = false;
+  }
+}
+
+function setStatus(status, detail) {
+  statusEl.className = status === 'error' ? 'error' : (status === 'done' ? 'done' : '');
+  const label = STATUS_LABELS[status] || status;
+  const spinner = (status !== 'done' && status !== 'error') ? '<span class="spinner"></span>' : '';
+  statusEl.innerHTML = spinner + label + (detail ? ` — ${detail}` : '');
+}
+
+function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      const job = await res.json();
+      setStatus(job.status, job.detail);
+
+      if (job.status === 'done') {
+        clearInterval(pollTimer);
+        submitBtn.disabled = false;
+        renderClips(job.clips);
+      } else if (job.status === 'error') {
+        clearInterval(pollTimer);
+        submitBtn.disabled = false;
+      }
+    } catch (e) {
+      clearInterval(pollTimer);
+      setStatus('error', 'Lost connection to server');
+      submitBtn.disabled = false;
+    }
+  }, 2000);
+}
+
+function renderClips(clips) {
+  if (!clips || clips.length === 0) {
+    resultsEl.innerHTML = '<div class="panel">No clips were produced.</div>';
+    return;
+  }
+  resultsEl.innerHTML = clips.map((c, i) => `
+    <div class="clip">
+      <video controls preload="metadata" src="${c.url}"></video>
+      <div class="meta">
+        <span>Clip ${i + 1} · ${c.length_sec}s · ${escapeHtml(c.reason || '')}</span>
+        <a href="${c.url}" download>Download</a>
+      </div>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+submitBtn.addEventListener('click', submitJob);
+</script>
+</body>
+</html>
